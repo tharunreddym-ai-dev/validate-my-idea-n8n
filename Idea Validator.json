@@ -1,0 +1,1066 @@
+{
+  "name": "Idea Validator",
+  "nodes": [
+    {
+      "parameters": {
+        "operation": "sendDocument",
+        "chatId": "={{ $('Trigger').first().json.message.chat.id }}",
+        "binaryData": true,
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2464,
+        96
+      ],
+      "id": "936bb309-2907-4511-bcfd-987ee6edb8cb",
+      "name": "Send a document",
+      "webhookId": "101e1632-523c-4b84-9f54-bbe1e4f66d79",
+      "credentials": {
+        "telegramApi": {
+          "id": "xwzAZ03C5uLcQtZw",
+          "name": "tool_space"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Input: Gemini's structured output (item.json.output), plus context\n// from earlier nodes for fields Gemini doesn't produce.\n\nconst data = $input.first().json.output ?? $input.first().json;\n\n// ---- 1. Compute total score + verdict (n8n owns this, never the LLM) ----\nconst total_score =\n  (data.market_potential_score || 0) +\n  (data.execution_difficulty_score || 0) +\n  (data.differentiation_score || 0) +\n  (data.risk_level_score || 0);\n\nlet verdict;\nif (total_score >= 70) verdict = \"GO\";\nelse if (total_score >= 40) verdict = \"CONDITIONAL GO\";\nelse verdict = \"NO-GO\";\n\n// ---- 2. Compute confidence from whether live search data existed ----\n// Pull the section-data flags saved by the earlier \"format for Gemini\" node\nconst formatNode = $('Format Searches').first().json; // adjust node name if different\nconst sectionsWithData = formatNode?.sections_with_data || [];\n\nconst marketSection = sectionsWithData.find(s => s.section === \"Market Size & Trend\");\nconst competitorSections = sectionsWithData.filter(s => s.section?.includes(\"Competitor\"));\n\nconst hadMarketData = marketSection?.hasData ?? false;\nconst hadCompetitorData = competitorSections.some(s => s.hasData);\n\nconst confidence = (hadMarketData && hadCompetitorData) ? \"Medium\" : \"Low\";\n// Note: bump to \"High\" only if you later add a manual/stronger check —\n// per the template, Low is the safe default when either section lacked live data.\n\n// ---- 3. Metadata ----\nconst report_id = `IVR-${Date.now()}`;\nconst generated_date = new Date().toISOString().split(\"T\")[0];\nconst tool_name = \"Tharun's Idea Validator Bot\";\n\n// Pull original idea + category if captured earlier in the pipeline\nconst plannerData = $('Extract Output').first().json;\nconst idea_one_liner = data.idea_restatement || \"\";\nconst category = plannerData?.category || \"General\";\n\n// ---- 4. Competitor + risk array unpacking (template needs flat fields) ----\nconst comp = data.competitors || [];\nconst risks = data.risks || [];\n\nconst flat = {\n  ...data,\n  total_score,\n  verdict,\n  confidence,\n  report_id,\n  generated_date,\n  category,\n  idea_one_liner,\n\n  input_quality_flag: \"PASS\",\n  input_quality_reason: \"\",\n\n  comp_1_name: comp[0]?.name || \"N/A\", comp_1_desc: comp[0]?.desc || \"\", comp_1_strength: comp[0]?.strength || \"\", comp_1_weakness: comp[0]?.weakness || \"\", comp_1_gap: comp[0]?.gap || \"\",\n  comp_2_name: comp[1]?.name || \"N/A\", comp_2_desc: comp[1]?.desc || \"\", comp_2_strength: comp[1]?.strength || \"\", comp_2_weakness: comp[1]?.weakness || \"\", comp_2_gap: comp[1]?.gap || \"\",\n  comp_3_name: comp[2]?.name || \"N/A\", comp_3_desc: comp[2]?.desc || \"\", comp_3_strength: comp[2]?.strength || \"\", comp_3_weakness: comp[2]?.weakness || \"\", comp_3_gap: comp[2]?.gap || \"\",\n\n  competitor_source_flag: hadCompetitorData ? \"Live search\" : \"Model knowledge only\",\n\n  risk_1: risks[0]?.risk || \"\", likelihood_1: risks[0]?.likelihood || \"\", impact_1: risks[0]?.impact || \"\", mitigation_1: risks[0]?.mitigation || \"\",\n  risk_2: risks[1]?.risk || \"\", likelihood_2: risks[1]?.likelihood || \"\", impact_2: risks[1]?.impact || \"\", mitigation_2: risks[1]?.mitigation || \"\",\n  risk_3: risks[2]?.risk || \"\", likelihood_3: risks[2]?.likelihood || \"\", impact_3: risks[2]?.impact || \"\", mitigation_3: risks[2]?.mitigation || \"\",\n\n  source_1: data.sources?.[0] || \"No external sources used — analysis based on model reasoning only.\",\n  source_2: data.sources?.[1] || \"\",\n  source_3: data.sources?.[2] || \"\",\n\n  tool_name\n};\n\nreturn [{ json: flat }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2144,
+        96
+      ],
+      "id": "55ea3529-5fe9-4ca3-bd97-7390076c3167",
+      "name": "Structure Output"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.context_block }}",
+        "hasOutputParser": true,
+        "needsFallback": true,
+        "options": {
+          "systemMessage": "You are a startup idea analyst. You will receive a startup idea and a block of research findings gathered from web search (market data, audience signals, pricing data, and competitor information). Using ONLY the research findings provided — do not invent facts, statistics, or competitor details not present in the findings — produce a structured idea validation analysis.\n\nRules:\n- Every field must be filled. If the research findings don't cover something, make a reasonable inference from what IS provided and note the uncertainty in that field's wording (e.g. \"Estimated based on limited data\") rather than leaving it blank.\n- Do NOT compute or state a final verdict (GO/CONDITIONAL GO/NO-GO) — that is calculated separately from your scores. Only provide the 4 sub-scores.\n- Strengths, weaknesses, risks, assumptions, and next steps must be EXACTLY 3 items each — no more, no fewer.\n- Strengths and weaknesses: max 15 words each.\n- Competitors section must have exactly 3 entries if competitors were identified in the research; if none were identified, state that explicitly in the positioning statement.\n- Sources: list the actual URLs/titles that appeared in the research findings you were given. Never fabricate a source. If a section had no live search data (this will be indicated), do not cite a source for claims in that section.\n- Next steps must start with an action verb (e.g. \"Interview,\" \"Build,\" \"Test,\" \"Survey\").\n- Assumptions must be testable/falsifiable statements, not vague hopes.\n- Keep all \"basis\" and \"note\" fields under 20 words.\n\nScore each dimension 0-25:\n- market_potential_score: size and growth of the addressable market\n- execution_difficulty_score: HIGHER score = EASIER to execute (25 = simple to build/launch, 0 = extremely hard)\n- differentiation_score: how distinct this idea is from what's already in the research findings\n- risk_level_score: HIGHER score = SAFER (25 = low risk, 0 = high risk)\n\nOutput ONLY the JSON object matching the provided schema. No markdown formatting, no explanation, no text outside the JSON."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        1776,
+        208
+      ],
+      "id": "b9b686f1-e841-47e6-8044-b54c7581b9db",
+      "name": "Final Report Maker",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $('Trigger').first().json.message.text }}",
+        "hasOutputParser": true,
+        "needsFallback": true,
+        "options": {
+          "systemMessage": "You are the research planner for an Idea Validation pipeline. You do not write the report yourself — you only decide what to search for.\n\nYou will receive a startup/product idea description. Your job:\n\n1. Identify exactly 3 real, named competitors for this idea (or the closest adjacent products if no direct competitor exists). Use the Tavily tool to confirm each one actually exists before including it — do not invent names.\n2. Generate 6 distinct search keyword groups, each a short list of 2-4 search-engine-style queries (not questions, not full sentences), covering these fixed research areas in order:\n   - keyword_search1: market size / market trend for this idea's category\n   - keyword_search2: target audience / ICP signals — who buys this, what triggers purchase\n   - keyword_search3: pricing models and typical price points for comparable products\n   - keyword_search4: named competitor 1 — their strengths, weaknesses, user complaints\n   - keyword_search5: named competitor 2 — their strengths, weaknesses, user complaints\n   - keyword_search6: named competitor 3 — their strengths, weaknesses, user complaints, plus any recent (last 12 months) funding/traction news for the category overall\n\nCall the Tavily tool only to verify a candidate competitor name is real before finalizing it — not to answer the report itself. Your only output is the JSON object described by the output schema. No commentary, no markdown, no text outside that JSON."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        496,
+        192
+      ],
+      "id": "e42f9ca4-e4fd-4593-8033-1ca77f6f7761",
+      "name": "Context Provider For Searching",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "schemaType": "manual",
+        "inputSchema": "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"market_potential_score\": { \"type\": \"integer\", \"minimum\": 0, \"maximum\": 25 },\n    \"execution_difficulty_score\": { \"type\": \"integer\", \"minimum\": 0, \"maximum\": 25 },\n    \"differentiation_score\": { \"type\": \"integer\", \"minimum\": 0, \"maximum\": 25 },\n    \"risk_level_score\": { \"type\": \"integer\", \"minimum\": 0, \"maximum\": 25 },\n\n    \"one_line_verdict\": { \"type\": \"string\" },\n    \"idea_restatement\": { \"type\": \"string\" },\n\n    \"problem_statement\": { \"type\": \"string\" },\n    \"primary_sufferer\": { \"type\": \"string\" },\n    \"why_now_signal\": { \"type\": \"string\" },\n\n    \"strength_1\": { \"type\": \"string\" },\n    \"strength_2\": { \"type\": \"string\" },\n    \"strength_3\": { \"type\": \"string\" },\n\n    \"weakness_1\": { \"type\": \"string\" },\n    \"weakness_2\": { \"type\": \"string\" },\n    \"weakness_3\": { \"type\": \"string\" },\n\n    \"tam_value\": { \"type\": \"string\" },\n    \"tam_basis\": { \"type\": \"string\" },\n    \"tam_confidence\": { \"type\": \"string\", \"enum\": [\"Estimated\", \"Sourced\"] },\n    \"sam_value\": { \"type\": \"string\" },\n    \"sam_basis\": { \"type\": \"string\" },\n    \"sam_confidence\": { \"type\": \"string\", \"enum\": [\"Estimated\", \"Sourced\"] },\n    \"som_value\": { \"type\": \"string\" },\n    \"som_basis\": { \"type\": \"string\" },\n    \"som_confidence\": { \"type\": \"string\", \"enum\": [\"Estimated\", \"Sourced\"] },\n    \"market_trend_summary\": { \"type\": \"string\" },\n\n    \"icp_segment\": { \"type\": \"string\" },\n    \"icp_persona\": { \"type\": \"string\" },\n    \"icp_trigger\": { \"type\": \"string\" },\n    \"icp_channels\": { \"type\": \"string\" },\n\n    \"competitors\": {\n      \"type\": \"array\",\n      \"maxItems\": 3,\n      \"items\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"name\": { \"type\": \"string\" },\n          \"desc\": { \"type\": \"string\" },\n          \"strength\": { \"type\": \"string\" },\n          \"weakness\": { \"type\": \"string\" },\n          \"gap\": { \"type\": \"string\" }\n        },\n        \"required\": [\"name\", \"desc\", \"strength\", \"weakness\", \"gap\"]\n      }\n    },\n    \"positioning_statement\": { \"type\": \"string\" },\n\n    \"pricing_model\": { \"type\": \"string\" },\n    \"price_point\": { \"type\": \"string\" },\n    \"revenue_stream\": { \"type\": \"string\" },\n    \"unit_economics_note\": { \"type\": \"string\" },\n\n    \"gtm_channel_1\": { \"type\": \"string\" },\n    \"gtm_channel_2\": { \"type\": \"string\" },\n    \"gtm_channel_3\": { \"type\": \"string\" },\n\n    \"risks\": {\n      \"type\": \"array\",\n      \"maxItems\": 3,\n      \"items\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"risk\": { \"type\": \"string\" },\n          \"likelihood\": { \"type\": \"string\", \"enum\": [\"Low\", \"Medium\", \"High\"] },\n          \"impact\": { \"type\": \"string\", \"enum\": [\"Low\", \"Medium\", \"High\"] },\n          \"mitigation\": { \"type\": \"string\" }\n        },\n        \"required\": [\"risk\", \"likelihood\", \"impact\", \"mitigation\"]\n      }\n    },\n\n    \"assumption_1\": { \"type\": \"string\" },\n    \"assumption_2\": { \"type\": \"string\" },\n    \"assumption_3\": { \"type\": \"string\" },\n\n    \"next_step_1\": { \"type\": \"string\" },\n    \"next_step_2\": { \"type\": \"string\" },\n    \"next_step_3\": { \"type\": \"string\" },\n\n    \"sources\": {\n      \"type\": \"array\",\n      \"maxItems\": 3,\n      \"items\": { \"type\": \"string\" }\n    }\n  },\n  \"required\": [\n    \"market_potential_score\", \"execution_difficulty_score\", \"differentiation_score\", \"risk_level_score\",\n    \"one_line_verdict\", \"idea_restatement\", \"problem_statement\", \"primary_sufferer\", \"why_now_signal\",\n    \"strength_1\", \"strength_2\", \"strength_3\", \"weakness_1\", \"weakness_2\", \"weakness_3\",\n    \"tam_value\", \"tam_basis\", \"tam_confidence\", \"sam_value\", \"sam_basis\", \"sam_confidence\",\n    \"som_value\", \"som_basis\", \"som_confidence\", \"market_trend_summary\",\n    \"icp_segment\", \"icp_persona\", \"icp_trigger\", \"icp_channels\",\n    \"competitors\", \"positioning_statement\",\n    \"pricing_model\", \"price_point\", \"revenue_stream\", \"unit_economics_note\",\n    \"gtm_channel_1\", \"gtm_channel_2\", \"gtm_channel_3\",\n    \"risks\", \"assumption_1\", \"assumption_2\", \"assumption_3\",\n    \"next_step_1\", \"next_step_2\", \"next_step_3\", \"sources\"\n  ]\n}",
+        "autoFix": true
+      },
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        1920,
+        416
+      ],
+      "id": "1081be9f-f3ac-41da-b736-afce4cad0f50",
+      "name": "Structured Output Parser"
+    },
+    {
+      "parameters": {
+        "descriptionType": "manual",
+        "toolDescription": "Use this tool ONLY to verify that a competitor you're about to name actually exists — call it once per candidate, e.g. \"<name> official website\". Do NOT use it to research market size, pricing, ICP, or competitor strengths/weaknesses — that happens in a separate step later in the pipeline, not by you. If a search returns nothing for a candidate name, drop it and try a different real competitor rather than inventing one.",
+        "query": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('Query', ``, 'string') }}",
+        "options": {}
+      },
+      "type": "@tavily/n8n-nodes-tavily.tavilyTool",
+      "typeVersion": 1,
+      "position": [
+        592,
+        448
+      ],
+      "id": "799be3ce-d6a5-4414-a938-4b411fd2868e",
+      "name": "Tavily",
+      "credentials": {
+        "tavilyApi": {
+          "id": "kL71kDoduid8cOjN",
+          "name": "Tavily account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "model": "openai/gpt-oss-120b",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [
+        336,
+        448
+      ],
+      "id": "7ea05927-a148-4952-96f4-6dc4e3b305fe",
+      "name": "GPT-OSS-120B",
+      "credentials": {
+        "groqApi": {
+          "id": "H9x3xQy6H0LLkQBm",
+          "name": "Groq account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "modelName": "models/gemini-3.5-flash-lite",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.1,
+      "position": [
+        1664,
+        400
+      ],
+      "id": "d03a806b-0a52-46f0-9cc5-272edd78df28",
+      "name": "FLASH-3.5",
+      "credentials": {
+        "googlePalmApi": {
+          "id": "klL9E4HFlH4Dwvt6",
+          "name": "gemini-excel"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Input: merged output — one item per Tavily search branch, in order.\n// Each Tavily node's output typically has a `results` array with\n// {title, url, content} per result. Adjust field names if your\n// Tavily node version differs.\n\nconst items = $input.all();\n\nconst LABELS = [\n  \"Market Size & Trend\",\n  \"Target Audience / ICP\",\n  \"Pricing Landscape\",\n  \"Competitor 1 Detail\",\n  \"Competitor 2 Detail\",\n  \"Competitor 3 Detail + Category News\"\n];\n\nconst MAX_RESULTS_PER_SECTION = 4;\nconst MAX_CONTENT_CHARS = 600; // trims any single result's snippet\n\nfunction formatSection(label, tavilyOutput) {\n  const results = tavilyOutput?.results || tavilyOutput?.json?.results || [];\n  if (!results.length) {\n    return `## ${label}\\n(No search results returned for this section.)\\n`;\n  }\n\n  const lines = results.slice(0, MAX_RESULTS_PER_SECTION).map((r, i) => {\n    const content = (r.content || r.snippet || \"\").slice(0, MAX_CONTENT_CHARS);\n    return `${i + 1}. ${r.title || \"Untitled\"} (${r.url || \"no url\"})\\n   ${content}`;\n  });\n\n  return `## ${label}\\n${lines.join(\"\\n\")}\\n`;\n}\n\n// Pull competitor names + original idea text from earlier in the workflow\nconst plannerData = $('Extract Output').first().json;\nconst ideaText = $('Extract Validation').first().json.idea_text\n  || $('Trigger').first().json.message.text\n  || \"\";\n\nlet contextBlock = `# IDEA\\n${ideaText}\\n\\n`;\n\ncontextBlock += `# COMPETITORS IDENTIFIED\\n`;\ncontextBlock += (plannerData.competitors || [])\n  .map((c, i) => `${i + 1}. ${c.name}`)\n  .join(\"\\n\") || \"None identified.\";\ncontextBlock += \"\\n\\n\";\n\ncontextBlock += `# RESEARCH FINDINGS\\n\\n`;\nitems.forEach((item, i) => {\n  contextBlock += formatSection(LABELS[i] || `Section ${i + 1}`, item.json) + \"\\n\";\n});\n\n// Track which sections actually had live data — feeds the confidence field later\nconst sectionsWithData = items.map((item, i) => ({\n  section: LABELS[i],\n  hasData: (item.json?.results || item.json?.json?.results || []).length > 0\n}));\n\nreturn [{\n  json: {\n    context_block: contextBlock,\n    sections_with_data: sectionsWithData,\n    competitor_exist: plannerData.competitor_exist,\n    competitors: plannerData.competitors\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1616,
+        208
+      ],
+      "id": "e968f765-6d6c-41b9-b46a-c868524d3ea6",
+      "name": "Format Searches"
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json.output ?? $input.first().json;\n\nlet data;\ntry {\n  data = typeof raw === \"string\" ? JSON.parse(raw) : raw;\n} catch (err) {\n  throw new Error(\"Failed to parse agent output as JSON: \" + String(raw).slice(0, 300));\n}\n\nconst kw = {\n  keyword_search1: data.keyword_search1 || [],\n  keyword_search2: data.keyword_search2 || [],\n  keyword_search3: data.keyword_search3 || [],\n  keyword_search4: data.keyword_search4 || [],\n  keyword_search5: data.keyword_search5 || [],\n  keyword_search6: data.keyword_search6 || []\n};\n\nconst competitors = Array.isArray(data.competitors) ? data.competitors : [];\nconst competitorExist = !!data.competitor_exist && competitors.length > 0;\n\nconst joinQuery = (arr) => arr.filter(Boolean).join(\" \");\n\nconst FIXED_SUFFIX = {\n  market: \"market size TAM SAM growth trend statistics 2026\",\n  icp: \"target customer ideal customer profile buyer persona pain points\",\n  pricing: \"pricing plans cost comparison subscription tiers\",\n  competitor: \"strengths weaknesses user reviews complaints pricing\",\n  competitorNews: \"strengths weaknesses user reviews recent funding news traction\"\n};\n\nconst buildQuery = (arr, suffix, fallbackPrefix) => {\n  const kwPart = joinQuery(arr);\n  const prefix = kwPart || fallbackPrefix || \"\";\n  return `${prefix} ${suffix}`.trim();\n};\n\nreturn [{\n  json: {\n    competitor_exist: competitorExist,\n    competitors,\n    query1: buildQuery(kw.keyword_search1, FIXED_SUFFIX.market),\n    query2: buildQuery(kw.keyword_search2, FIXED_SUFFIX.icp),\n    query3: buildQuery(kw.keyword_search3, FIXED_SUFFIX.pricing),\n    query4: buildQuery(kw.keyword_search4, FIXED_SUFFIX.competitor, competitors[0]?.name || \"\"),\n    query5: buildQuery(kw.keyword_search5, FIXED_SUFFIX.competitor, competitors[1]?.name || \"\"),\n    query6: buildQuery(kw.keyword_search6, FIXED_SUFFIX.competitorNews, competitors[2]?.name || \"\")\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        112
+      ],
+      "id": "dbbe5479-a4ef-4040-bd36-808d8981c3e2",
+      "name": "Extract Output"
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Trigger').first().json.message.chat.id }}",
+        "text": "I can help you validate a startup, business, product, service, or project idea.  Please send me an idea you'd like to validate.  For example: \"An app where students upload their notes and AI generates personalized quizzes.\"",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        528,
+        -176
+      ],
+      "id": "21febebb-c5a5-4554-8c77-24988ac2dce3",
+      "name": "Send Intro",
+      "webhookId": "2ead6b12-7dff-474d-9596-16ef4734cd20",
+      "credentials": {
+        "telegramApi": {
+          "id": "xwzAZ03C5uLcQtZw",
+          "name": "tool_space"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Trigger').first().json.message.chat.id }}",
+        "text": "I understand that you have an idea, but I need a little more detail to validate it properly.  Please describe: - What you are building - Who it is for - What problem it solves - How you think it will work  Don't worry about grammar or formatting. Just explain the idea in your own words.",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        528,
+        0
+      ],
+      "id": "5090d694-1eee-4671-b575-9443c3be7234",
+      "name": "Ask Detailed Explanation",
+      "webhookId": "2ead6b12-7dff-474d-9596-16ef4734cd20",
+      "credentials": {
+        "telegramApi": {
+          "id": "xwzAZ03C5uLcQtZw",
+          "name": "tool_space"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.5,
+      "position": [
+        -272,
+        96
+      ],
+      "id": "5e423d82-5f42-4fdf-8c2f-82ef0fea77d0",
+      "name": "Trigger",
+      "webhookId": "817644d0-f79d-43cf-9bcd-abdde4a9060f",
+      "credentials": {
+        "telegramApi": {
+          "id": "xwzAZ03C5uLcQtZw",
+          "name": "tool_space"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract the JSON content from Groq API response\nconst content = $input.first().json.choices?.[0]?.message?.content;\n\n// Parse and return\ntry {\n  const parsed = JSON.parse(content);\n  return [{ json: parsed }];\n} catch (err) {\n  return [{\n    json: {\n      error: true,\n      message: \"Failed to parse LLM response\",\n      raw: content\n    }\n  }];\n}\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        112,
+        0
+      ],
+      "id": "446d5eab-5589-427a-82b0-ed3a76ce0e08",
+      "name": "Extract Validation"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "groqApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"groq/compound-mini\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are an input classifier for an Idea Validation system. Classify the user's message into exactly one of these three categories: 'no', 'not_detailed', or 'detailed'. 'no' means the message is clearly not an idea and does not describe a product, service, startup, business, application, project, or solution. 'not_detailed' means the user appears to have an idea, but there is not enough understandable information to meaningfully validate it. 'detailed' means the user's message contains enough understandable information about an idea to begin validation. The idea does NOT need to be perfectly written, grammatically correct, structured, or technical. Accept informal language, spelling mistakes, incomplete sentences, mixed language, and conversational descriptions if the intended idea can reasonably be understood. Do not reject an idea merely because it is short. Before classification, mentally clean and normalize the user's input by ignoring unnecessary quotation marks, repeated punctuation, formatting noise, and irrelevant conversational text. Do not modify or return the user's input. Return ONLY valid JSON in exactly this format: {\\\"idea\\\":\\\"no\\\"}, {\\\"idea\\\":\\\"not_detailed\\\"}, or {\\\"idea\\\":\\\"detailed\\\"}. Do not include markdown, explanations, or any additional fields.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify($json.message.text) }}\n    }\n  ],\n  \"temperature\": 0\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -96,
+        96
+      ],
+      "id": "2f833a99-644a-4957-965e-e803ba455329",
+      "name": "Validate Input",
+      "credentials": {
+        "groqApi": {
+          "id": "H9x3xQy6H0LLkQBm",
+          "name": "Groq account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.idea }}",
+                    "rightValue": "no",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "9c26d4d2-bc64-4585-9dea-ea7b425e5d1f"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "greeting"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "3b21e915-d02e-4fe2-928f-245b69120269",
+                    "leftValue": "={{ $json.idea }}",
+                    "rightValue": "not_detailed",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "resend idea"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "a54e92a0-ddad-43f7-9fc3-4e35b2ce929d",
+                    "leftValue": "={{ $json.idea}}",
+                    "rightValue": "detailed",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "validated"
+            }
+          ]
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        272,
+        -16
+      ],
+      "id": "eb98cc5e-79cc-4259-9897-578be3d45f61",
+      "name": "Switch"
+    },
+    {
+      "parameters": {
+        "numberInputs": 6
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1440,
+        144
+      ],
+      "id": "5ed8ea29-e7c2-41b3-93dd-3997839ca847",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "schemaType": "manual",
+        "inputSchema": "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"competitor_exist\": { \"type\": \"boolean\" },\n    \"competitors\": {\n      \"type\": \"array\",\n      \"items\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"name\": { \"type\": \"string\" }\n        },\n        \"required\": [\"name\"]\n      },\n      \"minItems\": 0,\n      \"maxItems\": 3\n    },\n    \"keyword_search1\": { \"type\": \"array\", \"items\": { \"type\": \"string\" }, \"minItems\": 2, \"maxItems\": 4 },\n    \"keyword_search2\": { \"type\": \"array\", \"items\": { \"type\": \"string\" }, \"minItems\": 2, \"maxItems\": 4 },\n    \"keyword_search3\": { \"type\": \"array\", \"items\": { \"type\": \"string\" }, \"minItems\": 2, \"maxItems\": 4 },\n    \"keyword_search4\": { \"type\": \"array\", \"items\": { \"type\": \"string\" }, \"minItems\": 2, \"maxItems\": 4 },\n    \"keyword_search5\": { \"type\": \"array\", \"items\": { \"type\": \"string\" }, \"minItems\": 2, \"maxItems\": 4 },\n    \"keyword_search6\": { \"type\": \"array\", \"items\": { \"type\": \"string\" }, \"minItems\": 2, \"maxItems\": 4 }\n  },\n  \"required\": [\"competitor_exist\", \"competitors\", \"keyword_search1\", \"keyword_search2\", \"keyword_search3\", \"keyword_search4\", \"keyword_search5\", \"keyword_search6\"]\n}",
+        "autoFix": true
+      },
+      "type": "@n8n/n8n-nodes-langchain.outputParserStructured",
+      "typeVersion": 1.3,
+      "position": [
+        720,
+        448
+      ],
+      "id": "539a7f6d-715d-4617-a9b6-87f8e2765d97",
+      "name": "Structured Output Parser1"
+    },
+    {
+      "parameters": {
+        "model": "openai/gpt-oss-20b",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [
+        720,
+        624
+      ],
+      "id": "4dc6f9a7-f6e6-4d27-bae3-e74f1b40e9b0",
+      "name": "GPT-OSS-20B",
+      "credentials": {
+        "groqApi": {
+          "id": "H9x3xQy6H0LLkQBm",
+          "name": "Groq account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "model": "openai/gpt-oss-120b",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [
+        1920,
+        560
+      ],
+      "id": "c3679e9b-b29e-4a25-9cc7-db4e684dfe23",
+      "name": "GPT-OSS-120B2",
+      "credentials": {
+        "groqApi": {
+          "id": "H9x3xQy6H0LLkQBm",
+          "name": "Groq account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "query": "= {{ $json.query1 }}",
+        "options": {
+          "max_results": 3
+        }
+      },
+      "type": "@tavily/n8n-nodes-tavily.tavily",
+      "typeVersion": 1,
+      "position": [
+        1184,
+        -256
+      ],
+      "id": "d67e5b3b-f708-463d-a0f5-0ed4da31af57",
+      "name": "Market Size And Trend",
+      "credentials": {
+        "tavilyApi": {
+          "id": "kL71kDoduid8cOjN",
+          "name": "Tavily account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "query": "={{ $json.query2 }}",
+        "options": {}
+      },
+      "type": "@tavily/n8n-nodes-tavily.tavily",
+      "typeVersion": 1,
+      "position": [
+        1184,
+        -96
+      ],
+      "id": "f49ffd39-5212-472e-8ce6-014520705995",
+      "name": "Who Are Audience",
+      "credentials": {
+        "tavilyApi": {
+          "id": "kL71kDoduid8cOjN",
+          "name": "Tavily account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "query": "={{ $json.query3 }}",
+        "options": {}
+      },
+      "type": "@tavily/n8n-nodes-tavily.tavily",
+      "typeVersion": 1,
+      "position": [
+        1184,
+        96
+      ],
+      "id": "582c95bf-9a98-4470-9e9f-88a904c42613",
+      "name": "Pricing",
+      "credentials": {
+        "tavilyApi": {
+          "id": "kL71kDoduid8cOjN",
+          "name": "Tavily account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "query": "={{ $json.query4 }}",
+        "options": {}
+      },
+      "type": "@tavily/n8n-nodes-tavily.tavily",
+      "typeVersion": 1,
+      "position": [
+        1184,
+        288
+      ],
+      "id": "862eef9a-62b3-4e34-9c7b-42f35f78dcf9",
+      "name": "Competitor1",
+      "credentials": {
+        "tavilyApi": {
+          "id": "kL71kDoduid8cOjN",
+          "name": "Tavily account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "query": "={{ $json.query5 }}",
+        "options": {}
+      },
+      "type": "@tavily/n8n-nodes-tavily.tavily",
+      "typeVersion": 1,
+      "position": [
+        1184,
+        480
+      ],
+      "id": "867f1dea-4215-477d-851d-4d8405379751",
+      "name": "Competitor2",
+      "credentials": {
+        "tavilyApi": {
+          "id": "kL71kDoduid8cOjN",
+          "name": "Tavily account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "model": "openai/gpt-oss-120b",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [
+        1792,
+        416
+      ],
+      "id": "88701071-8e89-440b-9b4f-ce1de8e08995",
+      "name": "GPT-OSS-120B3",
+      "credentials": {
+        "groqApi": {
+          "id": "H9x3xQy6H0LLkQBm",
+          "name": "Groq account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1.1,
+      "position": [
+        464,
+        448
+      ],
+      "id": "88667fb6-c6d9-4b57-a3b8-f768d2edc30b",
+      "name": "FLASH-3",
+      "credentials": {
+        "googlePalmApi": {
+          "id": "klL9E4HFlH4Dwvt6",
+          "name": "gemini-excel"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "query": "={{ $json.query6 }}",
+        "options": {}
+      },
+      "type": "@tavily/n8n-nodes-tavily.tavily",
+      "typeVersion": 1,
+      "position": [
+        1184,
+        640
+      ],
+      "id": "670c0096-ee9c-4d54-b40f-cd33fd25824f",
+      "name": "Competitor3",
+      "credentials": {
+        "tavilyApi": {
+          "id": "kL71kDoduid8cOjN",
+          "name": "Tavily account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Trigger').first().json.message.chat.id }}",
+        "text": "Sorry there was an Error Please Try Again Later",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        112,
+        192
+      ],
+      "id": "71ebd174-3e43-4515-9d4b-d25cac7b52c0",
+      "name": "Send Validation Error Message",
+      "webhookId": "c4234f65-ae0f-4291-bbcf-69330026fed1",
+      "credentials": {
+        "telegramApi": {
+          "id": "xwzAZ03C5uLcQtZw",
+          "name": "tool_space"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Trigger').first().json.message.chat.id }}",
+        "text": "I couldn't complete the competitor research for your idea right now.  The research service encountered an issue while searching for relevant competitors and market information.  Please try again in a few minutes.",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        896,
+        272
+      ],
+      "id": "8a2245d0-7959-416a-8392-953f2f051b34",
+      "name": "Send Search Error Message",
+      "webhookId": "c0d2b94b-8755-4562-b6b8-486e8b96bea5",
+      "credentials": {
+        "telegramApi": {
+          "id": "xwzAZ03C5uLcQtZw",
+          "name": "tool_space"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Trigger').first().json.message.chat.id }}",
+        "text": "=I couldn't generate your validation report right now.\n\nThe research was completed, but an error occurred while generating the final report.\n\nPlease try again in a few minutes.",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2160,
+        272
+      ],
+      "id": "aecb5b75-5d4b-4314-9e4c-bd1cb181ade0",
+      "name": "Send Report Error Message",
+      "webhookId": "aa57b487-0281-486c-9f49-f7a5e6b2d22b",
+      "credentials": {
+        "telegramApi": {
+          "id": "xwzAZ03C5uLcQtZw",
+          "name": "tool_space"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "# AI STARTUP IDEA VALIDATOR\n\nA Telegram-based AI system that evaluates startup, business, product, and service ideas using structured market and competitive research.\n\nThe workflow first validates the user's idea, identifies relevant real-world competitors, and generates targeted research queries covering market trends, target customers, pricing, competitors, and recent category activity.\n\nMultiple Tavily searches run in parallel, after which an AI model analyzes the collected research and produces a structured validation report with market potential, execution difficulty, differentiation, risk, strengths, weaknesses, business model, go-to-market strategy, and recommended next steps.\n\nThe workflow calculates the final score and verdict programmatically, converts the complete analysis into a Markdown report, and automatically delivers the finished report to the user through Telegram.",
+        "height": 368,
+        "width": 832
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        1648,
+        -304
+      ],
+      "typeVersion": 1,
+      "id": "3bb43c4b-eddd-4fc5-b4f4-9d53548afe50",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst d = Array.isArray(data) ? data[0] : data;\n\nfunction safe(v) {\n  if (v === undefined || v === null || v === \"\") return \"Not available\";\n  return String(v);\n}\n\nconst TEMPLATE = `# Idea Validation Report — Standard Form (v2)\n\n## Idea Validation Report\n\n**Idea:** {idea_one_liner}\n**Report ID:** {report_id}\n**Generated:** {generated_date}\n**Category:** {category}\n\n---\n\n### 1. Verdict\n\n| Dimension | Score |\n|---|---|\n| Market Potential | {market_potential_score}/25 |\n| Execution Difficulty | {execution_difficulty_score}/25 |\n| Differentiation | {differentiation_score}/25 |\n| Risk Level (higher = safer) | {risk_level_score}/25 |\n| **Total** | **{total_score}/100** |\n\n**Verdict:** {verdict}\n**Confidence:** {confidence}\n**One-line take:** {one_line_verdict}\n\n---\n\n### 2. Idea Restatement\n\n{idea_restatement}\n\n---\n\n### 3. Problem & Timing\n\n| | |\n|---|---|\n| Problem being solved | {problem_statement} |\n| Who feels this pain most | {primary_sufferer} |\n| Why now | {why_now_signal} |\n\n---\n\n### 4. Strengths\n\n- {strength_1}\n- {strength_2}\n- {strength_3}\n\n---\n\n### 5. Weaknesses & Red Flags\n\n- {weakness_1}\n- {weakness_2}\n- {weakness_3}\n\n---\n\n### 6. Market Sizing\n\n| Layer | Estimate | Basis | Confidence |\n|---|---|---|---|\n| TAM | {tam_value} | {tam_basis} | {tam_confidence} |\n| SAM | {sam_value} | {sam_basis} | {sam_confidence} |\n| SOM | {som_value} | {som_basis} | {som_confidence} |\n\n**Trend / growth signal:** {market_trend_summary}\n\n---\n\n### 7. Target Audience / ICP\n\n| Attribute | Detail |\n|---|---|\n| Primary segment | {icp_segment} |\n| Persona / company size | {icp_persona} |\n| Buying trigger | {icp_trigger} |\n| Where they can be reached | {icp_channels} |\n\n---\n\n### 8. Competitive Landscape\n\n| Competitor | What they do | Strength | Weakness | Exploitable gap |\n|---|---|---|---|---|\n| {comp_1_name} | {comp_1_desc} | {comp_1_strength} | {comp_1_weakness} | {comp_1_gap} |\n| {comp_2_name} | {comp_2_desc} | {comp_2_strength} | {comp_2_weakness} | {comp_2_gap} |\n| {comp_3_name} | {comp_3_desc} | {comp_3_strength} | {comp_3_weakness} | {comp_3_gap} |\n\n**Positioning statement:** {positioning_statement}\n**Source used for this section:** {competitor_source_flag}\n\n---\n\n### 9. Business Model\n\n| Element | Detail |\n|---|---|\n| Suggested pricing model | {pricing_model} |\n| Price point (estimate) | {price_point} |\n| Primary revenue stream | {revenue_stream} |\n| Unit economics sanity check | {unit_economics_note} |\n\n---\n\n### 10. Go-To-Market — First 100 Users\n\n- {gtm_channel_1}\n- {gtm_channel_2}\n- {gtm_channel_3}\n\n---\n\n### 11. Risks & Mitigation\n\n| Risk | Likelihood | Impact | Mitigation |\n|---|---|---|---|\n| {risk_1} | {likelihood_1} | {impact_1} | {mitigation_1} |\n| {risk_2} | {likelihood_2} | {impact_2} | {mitigation_2} |\n| {risk_3} | {likelihood_3} | {impact_3} | {mitigation_3} |\n\n---\n\n### 12. Assumptions To Validate Before Building\n\n- {assumption_1}\n- {assumption_2}\n- {assumption_3}\n\n---\n\n### 13. Recommended Next Steps\n\n1. {next_step_1}\n2. {next_step_2}\n3. {next_step_3}\n\n---\n\n### 14. Sources\n\n- {source_1}\n- {source_2}\n- {source_3}\n\n---\n\n*Generated by {tool_name} — AI-generated analysis, not financial or investment advice.*\n`;\n\nlet md = TEMPLATE;\nfor (const [key, value] of Object.entries(d)) {\n  const placeholder = new RegExp(`\\\\{${key}\\\\}`, \"g\");\n  md = md.replace(placeholder, safe(value));\n}\n\nconst buffer = Buffer.from(md, \"utf8\");\n\nreturn [\n  {\n    json: {\n      report_id: d.report_id,\n      verdict: d.verdict,\n      total_score: d.total_score,\n      filename: `idea-validation-${d.report_id || \"report\"}.md`\n    },\n    binary: {\n      data: await this.helpers.prepareBinaryData(\n        buffer,\n        `idea-validation-${d.report_id || \"report\"}.md`,\n        \"text/markdown\"\n      )\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2304,
+        96
+      ],
+      "id": "95fe0be7-6bc2-4525-96f9-8c98da292e11",
+      "name": "Convertion to Binary"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Structure Output": {
+      "main": [
+        [
+          {
+            "node": "Convertion to Binary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Final Report Maker": {
+      "main": [
+        [
+          {
+            "node": "Structure Output",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Report Error Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Context Provider For Searching": {
+      "main": [
+        [
+          {
+            "node": "Extract Output",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Search Error Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Structured Output Parser": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Final Report Maker",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tavily": {
+      "ai_tool": [
+        [
+          {
+            "node": "Context Provider For Searching",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GPT-OSS-120B": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Context Provider For Searching",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FLASH-3.5": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Final Report Maker",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Searches": {
+      "main": [
+        [
+          {
+            "node": "Final Report Maker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Output": {
+      "main": [
+        [
+          {
+            "node": "Market Size And Trend",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Who Are Audience",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Pricing",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Competitor1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Competitor2",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Competitor3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trigger": {
+      "main": [
+        [
+          {
+            "node": "Validate Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Validation": {
+      "main": [
+        [
+          {
+            "node": "Switch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Input": {
+      "main": [
+        [
+          {
+            "node": "Extract Validation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Validation Error Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch": {
+      "main": [
+        [
+          {
+            "node": "Send Intro",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ask Detailed Explanation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Context Provider For Searching",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Format Searches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Structured Output Parser1": {
+      "ai_outputParser": [
+        [
+          {
+            "node": "Context Provider For Searching",
+            "type": "ai_outputParser",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GPT-OSS-20B": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Structured Output Parser1",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GPT-OSS-120B2": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Structured Output Parser",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Market Size And Trend": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Who Are Audience": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Pricing": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Competitor1": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 3
+          }
+        ]
+      ]
+    },
+    "Competitor2": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 4
+          }
+        ]
+      ]
+    },
+    "GPT-OSS-120B3": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Final Report Maker",
+            "type": "ai_languageModel",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "FLASH-3": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Context Provider For Searching",
+            "type": "ai_languageModel",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Competitor3": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 5
+          }
+        ]
+      ]
+    },
+    "Convertion to Binary": {
+      "main": [
+        [
+          {
+            "node": "Send a document",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "e7b10412-599c-4e6b-a209-08c18adb897a",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "1630a9b5a6440a44170b073990650ae9a4fd64d7853e1ab0afc6f4352ebda0d8"
+  },
+  "nodeGroups": [],
+  "id": "zBfOBNX1D6jU4DYY",
+  "tags": []
+}
